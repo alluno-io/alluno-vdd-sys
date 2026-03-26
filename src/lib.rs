@@ -467,11 +467,19 @@ impl AllunoVdd {
         copy_str_to_buf(serial, &mut params.serial_number);
 
         let raw: RawAddResult = self.ioctl_in_out(IOCTL_ALLUNO_VDD_ADD_DISPLAY, &params)?;
-        Ok(AddResult {
+        let result = AddResult {
             adapter_luid: raw.adapter_luid,
             target_id: raw.target_id,
             monitor_guid,
-        })
+        };
+
+        // Auto-enable HDR for 10+ bpc displays
+        if params.bits_per_channel >= 10 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let _ = set_advanced_color(result.adapter_luid, result.target_id, true);
+        }
+
+        Ok(result)
     }
 
     /// Remove a virtual display by GUID.
@@ -650,6 +658,40 @@ impl Drop for AllunoVdd {
 
 unsafe impl Send for AllunoVdd {}
 unsafe impl Sync for AllunoVdd {}
+
+// ============================================================================
+// Advanced Color (HDR) control via Windows Display API
+// ============================================================================
+
+/// Enable or disable Advanced Color (HDR) on a display target.
+///
+/// Uses `DisplayConfigSetDeviceInfo` — does not require the driver handle.
+/// Call after `add_display` with the returned `adapter_luid` and `target_id`.
+pub fn set_advanced_color(adapter_luid: i64, target_id: u32, enable: bool) -> Result<()> {
+    use windows::Win32::Devices::Display::*;
+
+    let luid = LUID {
+        LowPart: adapter_luid as u32,
+        HighPart: (adapter_luid >> 32) as i32,
+    };
+
+    let mut state: DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE = unsafe { zeroed() };
+    state.header.r#type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
+    state.header.size = size_of::<DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE>() as u32;
+    state.header.adapterId = luid;
+    state.header.id = target_id;
+    state.Anonymous.Anonymous._bitfield = u32::from(enable);
+
+    let ret = unsafe { DisplayConfigSetDeviceInfo(&state.header) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(Error::new(
+            HRESULT(ret),
+            "DisplayConfigSetDeviceInfo failed",
+        ))
+    }
+}
 
 // ============================================================================
 // Helpers
