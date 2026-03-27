@@ -67,6 +67,7 @@ device.remove_all().unwrap();
 | `set_hdr()` / `set_hdr_with_metadata()` | Enable HDR with optional ST.2086 metadata |
 | `set_custom_edid()` | Inject custom EDID (128 or 256 bytes) |
 | `is_compatible()` | Check driver protocol compatibility |
+| `set_advanced_color(luid, target, enable)` | Enable/disable HDR on a display (auto-called for 10bpc) |
 
 ## Testing
 
