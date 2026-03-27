@@ -18,7 +18,7 @@ Provides safe, ergonomic access to the AllunoVDD kernel driver via Windows IOCTL
 ## Requirements
 
 - Windows 10/11
-- AllunoVDD driver installed and running
+- AllunoVDD driver installed (from [alluno-vdd](https://github.com/alluno-io/alluno-vdd))
 
 ## Usage
 
