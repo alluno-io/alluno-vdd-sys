@@ -14,6 +14,10 @@ Provides safe, ergonomic access to the AllunoVDD kernel driver via Windows IOCTL
 - Watchdog timer management
 - Display mode hot-update
 - Up to 16 simultaneous virtual displays
+- Set any display as primary
+- Set display topology (extend or duplicate)
+- Move all windows to a target display
+- Enumerate all active system displays
 
 ## Requirements
 
@@ -26,7 +30,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-alluno-vdd-sys = "1.0"
+alluno-vdd-sys = "1.1.1"
 ```
 
 ```rust
@@ -40,15 +44,31 @@ device.set_watchdog(0).unwrap(); // disable watchdog
 let result = device.add_display(1920, 1080, 60, "Test", 8, 0).unwrap();
 println!("Added display, target_id={}", result.target_id);
 
+// Ensure extended desktop (not duplicate/mirror)
+set_display_topology(DisplayTopology::Extend).unwrap();
+// Or duplicate: set_display_topology(DisplayTopology::Duplicate).unwrap();
+
+// Set the virtual display as primary and move all windows to it
+set_primary_display("\\\\.\\DISPLAY9").unwrap();
+move_all_windows_to_display("\\\\.\\DISPLAY9").unwrap();
+
 let list = device.list_displays().unwrap();
 for d in &list {
     println!("{}x{} @{}Hz", d.width, d.height, d.refresh_rate);
+}
+
+// List all system displays (physical + virtual)
+for d in list_system_displays() {
+    let primary = if d.is_primary { " [PRIMARY]" } else { "" };
+    println!("{} {}x{} @{}Hz \"{}\"{}", d.device_name, d.width, d.height, d.refresh_rate, d.adapter_desc, primary);
 }
 
 device.remove_all().unwrap();
 ```
 
 ## API
+
+### AllunoVdd (driver handle)
 
 | Method | Description |
 |---|---|
@@ -67,15 +87,34 @@ device.remove_all().unwrap();
 | `set_hdr()` / `set_hdr_with_metadata()` | Enable HDR with optional ST.2086 metadata |
 | `set_custom_edid()` | Inject custom EDID (128 or 256 bytes) |
 | `is_compatible()` | Check driver protocol compatibility |
+
+### Display management (free functions)
+
+| Function | Description |
+|---|---|
+| `set_primary_display(device_name)` | Set any display as primary via DisplayConfig API (works with IddCx) |
+| `set_display_topology(topology)` | Set display topology: `Extend` or `Duplicate` |
+| `move_all_windows_to_display(device_name)` | Move all visible windows to a target display (including minimized) |
+| `list_system_displays()` | Enumerate all active GDI displays with resolution and primary status |
 | `set_advanced_color(luid, target, enable)` | Enable/disable HDR on a display (auto-called for 10bpc) |
 
-## Testing
+## Test Tool
 
-Tests require the AllunoVDD driver to be installed:
+An interactive test binary is included:
 
 ```sh
-cargo test -- --nocapture
+cargo run --bin alluno-vdd-test
 ```
+
+Commands:
+- `1`-`9` — Add displays at various resolutions
+- `h1`-`h3` — Add HDR displays
+- `0` — Remove all displays
+- `L` — List VDD + system displays
+- `s<N>` — Set DISPLAY\<N\> as primary (e.g., `s9`)
+- `m<N>` — Move all windows to DISPLAY\<N\>
+- `P` — Ping driver
+- `Q` — Quit
 
 ## License
 

@@ -22,11 +22,14 @@
 
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
-use windows::core::{Error, Result, GUID, HRESULT};
+use windows::core::{Error, Result, GUID, HRESULT, PCWSTR};
 use windows::Win32::Devices::DeviceAndDriverInstallation::*;
+use windows::Win32::Devices::Display::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Storage::FileSystem::*;
 use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::UI::WindowsAndMessaging::*;
 
 // ============================================================================
 // Constants
@@ -668,8 +671,6 @@ unsafe impl Sync for AllunoVdd {}
 /// Uses `DisplayConfigSetDeviceInfo` — does not require the driver handle.
 /// Call after `add_display` with the returned `adapter_luid` and `target_id`.
 pub fn set_advanced_color(adapter_luid: i64, target_id: u32, enable: bool) -> Result<()> {
-    use windows::Win32::Devices::Display::*;
-
     let luid = LUID {
         LowPart: adapter_luid as u32,
         HighPart: (adapter_luid >> 32) as i32,
@@ -691,6 +692,440 @@ pub fn set_advanced_color(adapter_luid: i64, target_id: u32, enable: bool) -> Re
             "DisplayConfigSetDeviceInfo failed",
         ))
     }
+}
+
+// ============================================================================
+// Set primary display
+// ============================================================================
+
+/// Set a display as the primary monitor using `ChangeDisplaySettingsExW`.
+///
+/// The primary display defines the (0,0) origin. This function:
+/// 1. Enumerates all active displays and their current positions
+/// 2. Calculates the offset to move the target display to (0,0)
+/// 3. Applies the offset to all displays, preserving relative layout
+/// 4. Marks the target as primary with `CDS_SET_PRIMARY`
+///
+/// `target_device_name` is the Windows GDI device name (e.g., `"\\\\.\\DISPLAY3"`).
+pub fn set_primary_display(target_device_name: &str) -> Result<()> {
+    // Step 1: Get buffer sizes for active display paths
+    let mut num_paths = 0u32;
+    let mut num_modes = 0u32;
+    let ret = unsafe {
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut num_paths, &mut num_modes)
+    };
+    if ret != WIN32_ERROR(0) {
+        return Err(Error::new(
+            HRESULT(ret.0 as i32),
+            "GetDisplayConfigBufferSizes failed",
+        ));
+    }
+
+    // Step 2: Query current display configuration
+    let mut paths = vec![unsafe { zeroed::<DISPLAYCONFIG_PATH_INFO>() }; num_paths as usize];
+    let mut modes = vec![unsafe { zeroed::<DISPLAYCONFIG_MODE_INFO>() }; num_modes as usize];
+    let ret = unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut num_paths,
+            paths.as_mut_ptr(),
+            &mut num_modes,
+            modes.as_mut_ptr(),
+            None,
+        )
+    };
+    if ret != WIN32_ERROR(0) {
+        return Err(Error::new(
+            HRESULT(ret.0 as i32),
+            "QueryDisplayConfig failed",
+        ));
+    }
+    paths.truncate(num_paths as usize);
+    modes.truncate(num_modes as usize);
+
+    // Step 3: Find which source index corresponds to the target device name
+    let mut target_source_idx: Option<u32> = None;
+    for path in &paths {
+        let mut source_name: DISPLAYCONFIG_SOURCE_DEVICE_NAME = unsafe { zeroed() };
+        source_name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        source_name.header.size = size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+        source_name.header.adapterId = path.sourceInfo.adapterId;
+        source_name.header.id = path.sourceInfo.id;
+
+        let ret = unsafe { DisplayConfigGetDeviceInfo(&mut source_name.header) };
+        if ret != 0i32 {
+            continue;
+        }
+
+        let gdi_name = String::from_utf16_lossy(&source_name.viewGdiDeviceName)
+            .trim_end_matches('\0')
+            .to_string();
+
+        if gdi_name == target_device_name {
+            target_source_idx = Some(unsafe { path.sourceInfo.Anonymous.modeInfoIdx });
+            break;
+        }
+    }
+
+    let target_idx = target_source_idx.ok_or_else(|| {
+        Error::new(
+            HRESULT(-1),
+            "Target display not found in DisplayConfig paths",
+        )
+    })? as usize;
+
+    // Step 4: Get target's current position
+    if target_idx >= modes.len() {
+        return Err(Error::new(HRESULT(-1), "Target mode index out of range"));
+    }
+    let target_mode = &modes[target_idx];
+    if target_mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
+        return Err(Error::new(HRESULT(-1), "Target mode is not a source mode"));
+    }
+    let (off_x, off_y) = unsafe {
+        let pos = target_mode.Anonymous.sourceMode.position;
+        (pos.x, pos.y)
+    };
+
+    // Step 5: Offset all source mode positions so target lands at (0,0)
+    for mode in &mut modes {
+        if mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE {
+            unsafe {
+                mode.Anonymous.sourceMode.position.x -= off_x;
+                mode.Anonymous.sourceMode.position.y -= off_y;
+            }
+        }
+    }
+
+    // Step 6: Apply the new configuration
+    let ret = unsafe {
+        SetDisplayConfig(
+            Some(&paths),
+            Some(&modes),
+            SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE,
+        )
+    };
+    if ret != 0i32 {
+        return Err(Error::new(HRESULT(ret), "SetDisplayConfig failed"));
+    }
+
+    Ok(())
+}
+
+/// Set the display topology to "Extend" mode.
+///
+/// Display topology mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayTopology {
+    /// Extended desktop — each display is independent.
+    Extend,
+    /// Duplicate/mirror — all displays show the same content.
+    Duplicate,
+}
+
+/// Set the display topology (extend or duplicate).
+///
+/// Call after adding a virtual display to control whether it appears as
+/// an extended desktop or a duplicate/mirror of the primary.
+pub fn set_display_topology(topology: DisplayTopology) -> Result<()> {
+    let flag = match topology {
+        DisplayTopology::Extend => SDC_TOPOLOGY_EXTEND,
+        DisplayTopology::Duplicate => SDC_TOPOLOGY_CLONE,
+    };
+    let ret = unsafe { SetDisplayConfig(None, None, SDC_APPLY | flag) };
+    if ret != 0i32 {
+        return Err(Error::new(HRESULT(ret), "SetDisplayConfig topology failed"));
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Move windows to display
+// ============================================================================
+
+/// Move all visible top-level windows to a target display.
+///
+/// Enumerates all visible top-level windows (including minimized) and repositions
+/// them onto the target display. For minimized windows, the restored position is
+/// updated via `SetWindowPlacement` without actually restoring them.
+///
+/// `target_device_name` is the Windows GDI device name (e.g., `"\\\\.\\DISPLAY9"`).
+pub fn move_all_windows_to_display(target_device_name: &str) -> Result<u32> {
+    // Find the target display's position and size
+    let mut target_rect: Option<RECT> = None;
+    let mut idx = 0u32;
+    loop {
+        let mut dd: DISPLAY_DEVICEW = unsafe { zeroed() };
+        dd.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+
+        if !unsafe { EnumDisplayDevicesW(PCWSTR(std::ptr::null()), idx, &mut dd, 0) }.as_bool() {
+            break;
+        }
+        idx += 1;
+
+        let name = String::from_utf16_lossy(&dd.DeviceName)
+            .trim_end_matches('\0')
+            .to_string();
+
+        if name == target_device_name {
+            let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let mut dm: DEVMODEW = unsafe { zeroed() };
+            dm.dmSize = size_of::<DEVMODEW>() as u16;
+            unsafe {
+                let _ = EnumDisplaySettingsW(
+                    PCWSTR(name_wide.as_ptr()),
+                    ENUM_CURRENT_SETTINGS,
+                    &mut dm,
+                );
+            }
+            let (x, y) = unsafe {
+                (
+                    dm.Anonymous1.Anonymous2.dmPosition.x,
+                    dm.Anonymous1.Anonymous2.dmPosition.y,
+                )
+            };
+            target_rect = Some(RECT {
+                left: x,
+                top: y,
+                right: x + dm.dmPelsWidth as i32,
+                bottom: y + dm.dmPelsHeight as i32,
+            });
+            break;
+        }
+    }
+
+    let target = target_rect.ok_or_else(|| {
+        Error::new(
+            HRESULT(-1),
+            "Target display not found for move_all_windows_to_display",
+        )
+    })?;
+
+    let target_w = target.right - target.left;
+    let target_h = target.bottom - target.top;
+
+    enum WindowMove {
+        Normal(HWND, i32, i32, i32, i32),
+        Minimized(HWND, WINDOWPLACEMENT),
+    }
+
+    struct MoveCtx {
+        target: RECT,
+        target_w: i32,
+        target_h: i32,
+        desktop: HWND,
+        shell: HWND,
+        moves: Vec<WindowMove>,
+    }
+
+    let mut ctx = MoveCtx {
+        target,
+        target_w,
+        target_h,
+        desktop: unsafe { GetDesktopWindow() },
+        shell: unsafe { GetShellWindow() },
+        moves: Vec::new(),
+    };
+
+    unsafe extern "system" fn enum_callback(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+        let ctx = &mut *(lparam.0 as *mut MoveCtx);
+
+        if !IsWindowVisible(hwnd).as_bool() {
+            return windows::core::BOOL(1);
+        }
+        if hwnd == ctx.desktop || hwnd == ctx.shell {
+            return windows::core::BOOL(1);
+        }
+
+        // Skip child windows and tool windows
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if style & WS_CHILD.0 != 0 {
+            return windows::core::BOOL(1);
+        }
+        if ex_style & WS_EX_TOOLWINDOW.0 != 0 {
+            return windows::core::BOOL(1);
+        }
+
+        // Skip owned windows (popups owned by another window)
+        if GetWindow(hwnd, GW_OWNER)
+            .map(|h| h != HWND::default())
+            .unwrap_or(false)
+        {
+            return windows::core::BOOL(1);
+        }
+
+        let is_minimized = IsIconic(hwnd).as_bool();
+
+        if is_minimized {
+            // Use GetWindowPlacement to read the restored position,
+            // update it to the target display, then SetWindowPlacement
+            // (keeps the window minimized but changes where it restores to)
+            let mut wp: WINDOWPLACEMENT = zeroed();
+            wp.length = size_of::<WINDOWPLACEMENT>() as u32;
+            if GetWindowPlacement(hwnd, &mut wp).is_err() {
+                return windows::core::BOOL(1);
+            }
+
+            let r = &wp.rcNormalPosition;
+            let win_w = r.right - r.left;
+            let win_h = r.bottom - r.top;
+            if win_w < 50 || win_h < 50 {
+                return windows::core::BOOL(1);
+            }
+
+            // Check if restored position is already on target
+            let win_cx = r.left + win_w / 2;
+            let win_cy = r.top + win_h / 2;
+            if win_cx >= ctx.target.left
+                && win_cx < ctx.target.right
+                && win_cy >= ctx.target.top
+                && win_cy < ctx.target.bottom
+            {
+                return windows::core::BOOL(1);
+            }
+
+            let new_w = win_w.min(ctx.target_w);
+            let new_h = win_h.min(ctx.target_h);
+            let new_x = ctx.target.left + (ctx.target_w - new_w) / 2;
+            let new_y = ctx.target.top + (ctx.target_h - new_h) / 2;
+
+            let mut new_wp = wp;
+            new_wp.rcNormalPosition = RECT {
+                left: new_x,
+                top: new_y,
+                right: new_x + new_w,
+                bottom: new_y + new_h,
+            };
+            ctx.moves.push(WindowMove::Minimized(hwnd, new_wp));
+        } else {
+            // Normal (non-minimized) window — use GetWindowRect + MoveWindow
+            let mut rect: RECT = zeroed();
+            if GetWindowRect(hwnd, &mut rect).is_err() {
+                return windows::core::BOOL(1);
+            }
+
+            let win_w = rect.right - rect.left;
+            let win_h = rect.bottom - rect.top;
+
+            if win_w < 50 || win_h < 50 {
+                return windows::core::BOOL(1);
+            }
+
+            // Already on target display?
+            let win_cx = rect.left + win_w / 2;
+            let win_cy = rect.top + win_h / 2;
+            if win_cx >= ctx.target.left
+                && win_cx < ctx.target.right
+                && win_cy >= ctx.target.top
+                && win_cy < ctx.target.bottom
+            {
+                return windows::core::BOOL(1);
+            }
+
+            let new_w = win_w.min(ctx.target_w);
+            let new_h = win_h.min(ctx.target_h);
+            let new_x = ctx.target.left + (ctx.target_w - new_w) / 2;
+            let new_y = ctx.target.top + (ctx.target_h - new_h) / 2;
+
+            ctx.moves
+                .push(WindowMove::Normal(hwnd, new_x, new_y, new_w, new_h));
+        }
+
+        windows::core::BOOL(1)
+    }
+
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_callback),
+            LPARAM(&mut ctx as *mut MoveCtx as isize),
+        );
+    }
+
+    let count = ctx.moves.len() as u32;
+    for m in ctx.moves {
+        unsafe {
+            match m {
+                WindowMove::Normal(hwnd, x, y, w, h) => {
+                    let _ = MoveWindow(hwnd, x, y, w, h, true);
+                }
+                WindowMove::Minimized(hwnd, wp) => {
+                    let _ = SetWindowPlacement(hwnd, &wp);
+                }
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+// ============================================================================
+// Display enumeration
+// ============================================================================
+
+/// Information about an active system display (physical or virtual).
+#[derive(Clone, Debug)]
+pub struct SystemDisplayInfo {
+    /// GDI device name (e.g., `\\.\DISPLAY9`)
+    pub device_name: String,
+    /// Adapter/driver description (e.g., "Intel(R) Iris(R) Xe Graphics")
+    pub adapter_desc: String,
+    pub width: u32,
+    pub height: u32,
+    pub refresh_rate: u32,
+    pub is_primary: bool,
+}
+
+/// Enumerate all active system displays.
+///
+/// Returns physical and virtual displays visible to Windows GDI.
+pub fn list_system_displays() -> Vec<SystemDisplayInfo> {
+    let mut displays = Vec::new();
+    let mut idx = 0u32;
+    loop {
+        let mut dd: DISPLAY_DEVICEW = unsafe { zeroed() };
+        dd.cb = size_of::<DISPLAY_DEVICEW>() as u32;
+
+        if !unsafe { EnumDisplayDevicesW(PCWSTR(std::ptr::null()), idx, &mut dd, 0) }.as_bool() {
+            break;
+        }
+        idx += 1;
+
+        let is_active =
+            (dd.StateFlags & DISPLAY_DEVICE_STATE_FLAGS(0x1)) != DISPLAY_DEVICE_STATE_FLAGS(0);
+        if !is_active {
+            continue;
+        }
+
+        let is_primary =
+            (dd.StateFlags & DISPLAY_DEVICE_STATE_FLAGS(0x4)) != DISPLAY_DEVICE_STATE_FLAGS(0);
+
+        let name = String::from_utf16_lossy(&dd.DeviceName)
+            .trim_end_matches('\0')
+            .to_string();
+        let desc = String::from_utf16_lossy(&dd.DeviceString)
+            .trim_end_matches('\0')
+            .to_string();
+        let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+
+        let mut dm: DEVMODEW = unsafe { zeroed() };
+        dm.dmSize = size_of::<DEVMODEW>() as u16;
+        let has_mode = unsafe {
+            EnumDisplaySettingsW(PCWSTR(name_wide.as_ptr()), ENUM_CURRENT_SETTINGS, &mut dm)
+        }
+        .as_bool();
+
+        displays.push(SystemDisplayInfo {
+            device_name: name,
+            adapter_desc: desc,
+            width: if has_mode { dm.dmPelsWidth } else { 0 },
+            height: if has_mode { dm.dmPelsHeight } else { 0 },
+            refresh_rate: if has_mode { dm.dmDisplayFrequency } else { 0 },
+            is_primary,
+        });
+    }
+
+    displays
 }
 
 // ============================================================================
