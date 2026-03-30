@@ -30,13 +30,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-alluno-vdd-sys = "1.1.1"
+alluno-vdd-sys = "1.1.2"
 ```
 
 ```rust
 use alluno_vdd_sys::*;
 
-let device = AllunoVdd::open().expect("driver not installed");
+let device = AllunoVdd::new().expect("driver not installed");
 let version = device.get_version().unwrap();
 println!("Driver v{}.{}.{}", version.major, version.minor, version.patch);
 
@@ -72,7 +72,7 @@ device.remove_all().unwrap();
 
 | Method | Description |
 |---|---|
-| `AllunoVdd::open()` | Open a handle to the driver |
+| `AllunoVdd::new()` | Open a handle to the driver |
 | `get_version()` | Query driver protocol version |
 | `ping()` | Reset watchdog countdown |
 | `add_display()` | Add a virtual display |

@@ -4,7 +4,7 @@
 //! ```no_run
 //! use alluno_vdd_sys::*;
 //!
-//! let device = AllunoVdd::open().expect("driver not installed");
+//! let device = AllunoVdd::new().expect("driver not installed");
 //! let version = device.get_version().unwrap();
 //! println!("Driver v{}.{}.{}", version.major, version.minor, version.patch);
 //!
@@ -277,7 +277,7 @@ pub struct AllunoVdd {
 
 impl AllunoVdd {
     /// Open a handle to the Alluno VDD driver.
-    pub fn open() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let mut list_size: u32 = 0;
         let cr = unsafe {
             CM_Get_Device_Interface_List_SizeW(
@@ -322,6 +322,12 @@ impl AllunoVdd {
         };
 
         Ok(Self { handle })
+    }
+
+    /// Open a handle to the Alluno VDD driver.
+    #[deprecated(note = "use new() instead")]
+    pub fn open() -> Result<Self> {
+        Self::new()
     }
 
     // ---- IOCTL helpers ----
@@ -692,6 +698,70 @@ pub fn set_advanced_color(adapter_luid: i64, target_id: u32, enable: bool) -> Re
             "DisplayConfigSetDeviceInfo failed",
         ))
     }
+}
+
+// ============================================================================
+// Resolve GDI device name from LUID + target ID
+// ============================================================================
+
+/// Resolve the Windows GDI device name (e.g. `\\.\DISPLAY5`) from the
+/// adapter LUID and target ID returned by `add_display`.
+///
+/// Returns `None` if the path is not found.
+pub fn resolve_gdi_device_name(adapter_luid: i64, target_id: u32) -> Option<String> {
+    let target_luid = LUID {
+        LowPart: adapter_luid as u32,
+        HighPart: (adapter_luid >> 32) as i32,
+    };
+
+    unsafe {
+        let mut path_count = 0u32;
+        let mut mode_count = 0u32;
+        let flags = QDC_ALL_PATHS | QDC_VIRTUAL_MODE_AWARE;
+
+        if GetDisplayConfigBufferSizes(flags, &mut path_count, &mut mode_count) != WIN32_ERROR(0) {
+            return None;
+        }
+
+        let mut paths = vec![zeroed::<DISPLAYCONFIG_PATH_INFO>(); path_count as usize];
+        let mut modes = vec![zeroed::<DISPLAYCONFIG_MODE_INFO>(); mode_count as usize];
+
+        if QueryDisplayConfig(
+            flags,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        ) != WIN32_ERROR(0)
+        {
+            return None;
+        }
+
+        for path in &paths[..path_count as usize] {
+            if path.sourceInfo.adapterId == target_luid && path.targetInfo.id == target_id {
+                let mut source_name: DISPLAYCONFIG_SOURCE_DEVICE_NAME = zeroed();
+                source_name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                source_name.header.size = size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+                source_name.header.adapterId = path.sourceInfo.adapterId;
+                source_name.header.id = path.sourceInfo.id;
+
+                if DisplayConfigGetDeviceInfo(&mut source_name.header) == 0 {
+                    let name_slice = &source_name.viewGdiDeviceName;
+                    let len = name_slice
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(name_slice.len());
+                    let name = String::from_utf16_lossy(&name_slice[..len]);
+                    if !name.is_empty() {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 // ============================================================================

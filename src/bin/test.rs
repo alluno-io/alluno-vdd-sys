@@ -13,7 +13,7 @@ fn main() {
     println!("AllunoVDD Test");
     println!("==============\n");
 
-    let device = match AllunoVdd::open() {
+    let device = match AllunoVdd::new() {
         Ok(d) => Arc::new(d),
         Err(e) => {
             eprintln!("ERROR: Could not open AllunoVDD driver: {e}");
@@ -225,7 +225,7 @@ fn ctrlc_cleanup(device: Arc<AllunoVdd>) {
 
     unsafe extern "system" fn handler(ctrl_type: u32) -> windows::core::BOOL {
         let _ = ctrl_type;
-        if let Ok(dev) = AllunoVdd::open() {
+        if let Ok(dev) = AllunoVdd::new() {
             let _ = dev.remove_all();
         }
         eprintln!("\n  Cleaned up all displays.");

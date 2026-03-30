@@ -13,7 +13,7 @@ static DRIVER_LOCK: Mutex<()> = Mutex::new(());
 macro_rules! locked_test {
     (|$device:ident| $body:block) => {{
         let _guard = DRIVER_LOCK.lock().unwrap();
-        let Some($device) = AllunoVdd::open().ok() else {
+        let Some($device) = AllunoVdd::new().ok() else {
             eprintln!("skipped: driver not installed");
             return;
         };
@@ -23,7 +23,7 @@ macro_rules! locked_test {
 
 #[test]
 fn test_open_device() {
-    match AllunoVdd::open() {
+    match AllunoVdd::new() {
         Ok(_) => eprintln!("driver opened successfully"),
         Err(_) => eprintln!("skipped: driver not installed"),
     }
