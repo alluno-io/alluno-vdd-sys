@@ -486,10 +486,21 @@ impl AllunoVdd {
             monitor_guid,
         };
 
-        // Auto-enable HDR for 10+ bpc displays
+        // Auto-enable HDR for 10+ bpc displays.
+        // Retry up to 10 times — Windows may not have the display path fully
+        // active yet after the IddCx IOCTL returns.
         if params.bits_per_channel >= 10 {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let _ = set_advanced_color(result.adapter_luid, result.target_id, true);
+            for attempt in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                if set_advanced_color(result.adapter_luid, result.target_id, true).is_ok() {
+                    break;
+                }
+                if attempt == 9 {
+                    // Last attempt failed — HDR won't be enabled
+                    #[cfg(debug_assertions)]
+                    eprintln!("[vdd] Failed to enable Advanced Color after 10 attempts");
+                }
+            }
         }
 
         Ok(result)
