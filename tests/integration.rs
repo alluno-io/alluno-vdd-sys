@@ -34,14 +34,14 @@ fn test_get_version() {
     locked_test!(|device| {
         let version = device.get_version().expect("get_version failed");
 
-        assert_eq!(version.major, ALLUNO_VDD_PROTOCOL_MAJOR);
+        assert_eq!(version.major, ALLUNO_VDD_VERSION_MAJOR);
         #[allow(clippy::absurd_extreme_comparisons)]
         {
-            assert!(version.minor >= ALLUNO_VDD_PROTOCOL_MINOR);
+            assert!(version.minor >= ALLUNO_VDD_VERSION_MINOR);
         }
         println!(
-            "Driver version: {}.{}.{}",
-            version.major, version.minor, version.patch
+            "Driver version: {}.{}.{}.{}",
+            version.major, version.minor, version.patch, version.build
         );
     });
 }

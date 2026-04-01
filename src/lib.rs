@@ -51,9 +51,10 @@ pub const ALLUNO_VDD_HDR_OFF: u32 = 0;
 pub const ALLUNO_VDD_HDR_HDR10: u32 = 1;
 pub const ALLUNO_VDD_HDR_HDR10_PLUS: u32 = 2;
 
-pub const ALLUNO_VDD_PROTOCOL_MAJOR: u32 = 2;
-pub const ALLUNO_VDD_PROTOCOL_MINOR: u32 = 0;
-pub const ALLUNO_VDD_PROTOCOL_PATCH: u32 = 0;
+pub const ALLUNO_VDD_VERSION_MAJOR: u32 = 1;
+pub const ALLUNO_VDD_VERSION_MINOR: u32 = 0;
+pub const ALLUNO_VDD_VERSION_PATCH: u32 = 0;
+pub const ALLUNO_VDD_VERSION_BUILD: u32 = 1;
 
 // IOCTL codes: CTL_CODE(FILE_DEVICE_UNKNOWN=0x22, function, METHOD_BUFFERED=0, FILE_ANY_ACCESS=0)
 #[allow(clippy::identity_op)]
@@ -144,6 +145,7 @@ struct RawVersion {
     major: u32,
     minor: u32,
     patch: u32,
+    build: u32,
 }
 
 #[repr(C, packed)]
@@ -217,12 +219,13 @@ pub struct AddResult {
     pub monitor_guid: GUID,
 }
 
-/// Protocol version.
+/// Driver version.
 #[derive(Debug, Clone)]
 pub struct Version {
     pub major: u32,
     pub minor: u32,
     pub patch: u32,
+    pub build: u32,
 }
 
 /// Watchdog state.
@@ -404,13 +407,14 @@ impl AllunoVdd {
 
     // ---- Public API ----
 
-    /// Get driver protocol version.
+    /// Get driver version.
     pub fn get_version(&self) -> Result<Version> {
         let raw: RawVersion = self.ioctl_out(IOCTL_ALLUNO_VDD_GET_VERSION)?;
         Ok(Version {
             major: raw.major,
             minor: raw.minor,
             patch: raw.patch,
+            build: raw.build,
         })
     }
 
@@ -649,11 +653,11 @@ impl AllunoVdd {
         self.ioctl_in(IOCTL_ALLUNO_VDD_SET_CUSTOM_EDID, &params)
     }
 
-    /// Check if driver is compatible with this crate's protocol version.
+    /// Check if driver version is compatible with this crate.
     pub fn is_compatible(&self) -> Result<bool> {
         let v = self.get_version()?;
         #[allow(clippy::absurd_extreme_comparisons)]
-        Ok(v.major == ALLUNO_VDD_PROTOCOL_MAJOR && v.minor >= ALLUNO_VDD_PROTOCOL_MINOR)
+        Ok(v.major == ALLUNO_VDD_VERSION_MAJOR && v.minor >= ALLUNO_VDD_VERSION_MINOR)
     }
 }
 
