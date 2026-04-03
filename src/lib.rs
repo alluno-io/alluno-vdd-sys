@@ -880,7 +880,7 @@ pub fn set_primary_display(target_device_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Set the display topology to "Extend" mode.
+/// Set the display topology.
 ///
 /// Display topology mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -889,16 +889,16 @@ pub enum DisplayTopology {
     Extend,
     /// Duplicate/mirror — all displays show the same content.
     Duplicate,
+    /// External only — physical turns off.
+    External,
 }
 
-/// Set the display topology (extend or duplicate).
-///
-/// Call after adding a virtual display to control whether it appears as
-/// an extended desktop or a duplicate/mirror of the primary.
+/// Set the display topology.
 pub fn set_display_topology(topology: DisplayTopology) -> Result<()> {
     let flag = match topology {
         DisplayTopology::Extend => SDC_TOPOLOGY_EXTEND,
         DisplayTopology::Duplicate => SDC_TOPOLOGY_CLONE,
+        DisplayTopology::External => SDC_TOPOLOGY_EXTERNAL,
     };
     let ret = unsafe { SetDisplayConfig(None, None, SDC_APPLY | flag) };
     if ret != 0i32 {

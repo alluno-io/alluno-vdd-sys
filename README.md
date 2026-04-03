@@ -15,7 +15,7 @@ Provides safe, ergonomic access to the AllunoVDD kernel driver via Windows IOCTL
 - Display mode hot-update
 - Up to 16 simultaneous virtual displays
 - Set any display as primary
-- Set display topology (extend or duplicate)
+- Set display topology (extend, duplicate, or external only)
 - Move all windows to a target display
 - Enumerate all active system displays
 
@@ -47,6 +47,7 @@ println!("Added display, target_id={}", result.target_id);
 // Ensure extended desktop (not duplicate/mirror)
 set_display_topology(DisplayTopology::Extend).unwrap();
 // Or duplicate: set_display_topology(DisplayTopology::Duplicate).unwrap();
+// Or external only (physical display off): set_display_topology(DisplayTopology::External).unwrap();
 
 // Set the virtual display as primary and move all windows to it
 set_primary_display("\\\\.\\DISPLAY9").unwrap();
@@ -93,7 +94,7 @@ device.remove_all().unwrap();
 | Function | Description |
 |---|---|
 | `set_primary_display(device_name)` | Set any display as primary via DisplayConfig API (works with IddCx) |
-| `set_display_topology(topology)` | Set display topology: `Extend` or `Duplicate` |
+| `set_display_topology(topology)` | Set display topology: `Extend`, `Duplicate`, or `External` |
 | `move_all_windows_to_display(device_name)` | Move all visible windows to a target display (including minimized) |
 | `list_system_displays()` | Enumerate all active GDI displays with resolution and primary status |
 | `set_advanced_color(luid, target, enable)` | Enable/disable HDR on a display (auto-called for 10bpc) |
