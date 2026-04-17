@@ -12,6 +12,10 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      deployments: write
+    environment:
+      name: production
+      url: https://github.com/${{ github.repository }}/releases/latest
 
     steps:
       - uses: actions/checkout@v4
